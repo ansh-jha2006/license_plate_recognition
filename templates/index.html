@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CarVision - License Plate Detector</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <h1>🚗 CarVision</h1>
+    <button onclick="toggleCamera()">🔍 Start Camera</button>
+    <div class="video-box" id="video-box"></div>
+    <h2>📋 Recognized Plates</h2>
+    <ul id="plate-list"></ul>
+  </div>
+
+  <script>
+    let streamStarted = false;
+
+    function toggleCamera() {
+      if (!streamStarted) {
+        const videoBox = document.getElementById("video-box");
+        videoBox.innerHTML = `<img src="/video_feed" width="640" height="480">`;
+        streamStarted = true;
+        setInterval(fetchPlates, 2000);
+      }
+    }
+
+    async function fetchPlates() {
+      const response = await fetch("/plates");
+      const data = await response.json();
+      const list = document.getElementById("plate-list");
+      list.innerHTML = "";
+      data.forEach(plate => {
+        const li = document.createElement("li");
+        li.textContent = plate;
+        list.appendChild(li);
+      });
+    }
+  </script>
+</body>
+</html>
