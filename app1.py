@@ -3,36 +3,49 @@ import cv2
 import pytesseract
 import re
 import numpy as np
-from difflib import get_close_matches  # For matching invalid state codes
 
 app = Flask(__name__)
 recognized_plates = []
 
-# Path to Tesseract executable
+# Tesseract path
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-# Load custom cascade for Indian plates
 plate_cascade = cv2.CascadeClassifier("indian_license_plate.xml")
-
-# Strict pattern: XX-00-XX-0000
 strict_plate_pattern = re.compile(r'^[A-Z]{2}[0-9]{2}[A-Z]{2}[0-9]{4}$')
 
-# List of valid Indian state codes
-valid_state_codes = [
-    "AP", "AR", "AS", "BR", "CH", "CT", "DL", "GA", "GJ", "HR", "HP", "JH", "JK", "KA", "KL", "LA", "LD", "MH", "ML",
-    "MN", "MP", "MZ", "NL", "OD", "PB", "PY", "RJ", "SK", "TN", "TR", "TS", "UK", "UP", "WB"
-]
+def enhance_image(img):
+    # Grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Histogram equalization
+    equalized = cv2.equalizeHist(gray)
+
+    # Bilateral filter to reduce noise and keep edges
+    blur = cv2.bilateralFilter(equalized, 11, 17, 17)
+
+    # Sharpening
+    kernel = np.array([[0, -1, 0], 
+                       [-1, 5,-1], 
+                       [0, -1, 0]])
+    sharpened = cv2.filter2D(blur, -1, kernel)
+
+    # Adaptive threshold for poor lighting or yellow plates
+    thresh = cv2.adaptiveThreshold(sharpened, 255,
+                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY, 11, 2)
+    return thresh
 
 def correct_perspective(roi):
-    # Detect edges using Canny
-    edges = cv2.Canny(roi, 50, 150)
-    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+    # Convert to grayscale
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 100, 200)
 
-    for contour in contours:
-        epsilon = 0.02 * cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, epsilon, True)
+    # Find contours
+    contours, _ = cv2.findContours(edges.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
+    for cnt in contours:
+        approx = cv2.approxPolyDP(cnt, 0.02 * cv2.arcLength(cnt, True), True)
         if len(approx) == 4:
             pts = approx.reshape(4, 2)
             rect = np.zeros((4, 2), dtype="float32")
@@ -46,12 +59,12 @@ def correct_perspective(roi):
             rect[3] = pts[np.argmax(diff)]
 
             (tl, tr, br, bl) = rect
-            widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
-            widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+            widthA = np.linalg.norm(br - bl)
+            widthB = np.linalg.norm(tr - tl)
             maxWidth = max(int(widthA), int(widthB))
 
-            heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
-            heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+            heightA = np.linalg.norm(tr - br)
+            heightB = np.linalg.norm(tl - bl)
             maxHeight = max(int(heightA), int(heightB))
 
             dst = np.array([
@@ -63,42 +76,14 @@ def correct_perspective(roi):
             M = cv2.getPerspectiveTransform(rect, dst)
             warped = cv2.warpPerspective(roi, M, (maxWidth, maxHeight))
             return warped
+
     return roi
 
-def validate_and_correct_state_code(plate_text):
-    # Extract the first two letters (state code)
-    state_code = plate_text[:2]
-    if state_code in valid_state_codes:
-        return plate_text  # Valid state code
-
-    # Find the closest match for the state code
-    closest_match = get_close_matches(state_code, valid_state_codes, n=1, cutoff=0.6)
-    if closest_match:
-        corrected_code = closest_match[0]
-        return corrected_code + plate_text[2:]  # Replace the state code with the corrected one
-    return None  # Invalid plate
-
-def preprocess_image(roi):
-    # Convert to grayscale
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    
-    # Use bilateral filter to preserve edges
-    blur = cv2.bilateralFilter(gray, 11, 17, 17)
-    
-    # Increase contrast
-    contrast = cv2.convertScaleAbs(blur, alpha=1.5, beta=0)
-
-    # Adaptive thresholding (better for yellow/dark plates)
-    thresh = cv2.adaptiveThreshold(contrast, 255,
-                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY, 11, 2)
-    return thresh
-
 def clean_plate_text(text):
-    # Remove non-alphanumeric and normalize spacing
     cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
-    # Validate and correct state code
-    return validate_and_correct_state_code(cleaned)
+    if strict_plate_pattern.match(cleaned):
+        return cleaned
+    return None
 
 def generate_frames():
     global recognized_plates
@@ -114,12 +99,15 @@ def generate_frames():
 
         for (x, y, w, h) in plates:
             roi_color = frame[y:y + h, x:x + w]
-            
-            # Correct perspective for tilted plates
-            roi_corrected = correct_perspective(roi_color)
-            processed = preprocess_image(roi_corrected)
 
-            text = pytesseract.image_to_string(processed, config='--psm 8')
+            # Correct tilted plates
+            warped_roi = correct_perspective(roi_color)
+
+            # Enhance for OCR
+            processed = enhance_image(warped_roi)
+
+            # Use improved Tesseract config
+            text = pytesseract.image_to_string(processed, config='--oem 3 --psm 7')
             plate_number = clean_plate_text(text)
 
             if plate_number and plate_number not in recognized_plates:
