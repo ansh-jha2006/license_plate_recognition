@@ -79,26 +79,33 @@ def validate_and_correct_state_code(plate_text):
     return None  # Invalid plate
 
 def preprocess_image(roi):
-    # Convert to grayscale
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    
-    # Use bilateral filter to preserve edges
     blur = cv2.bilateralFilter(gray, 11, 17, 17)
-    
-    # Increase contrast
     contrast = cv2.convertScaleAbs(blur, alpha=1.5, beta=0)
 
-    # Adaptive thresholding (better for yellow/dark plates)
+    # Adaptive thresholding
     thresh = cv2.adaptiveThreshold(contrast, 255,
                                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                    cv2.THRESH_BINARY, 11, 2)
-    return thresh
+
+    # Apply morphological closing to connect text parts
+    kernel = np.ones((3, 3), np.uint8)
+    morph = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+    return morph
 
 def clean_plate_text(text):
-    # Remove non-alphanumeric and normalize spacing
+    # Remove all non-alphanumeric characters and uppercase
     cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
+
+    # Early return if length is off (Indian plates usually 10 characters)
+    if len(cleaned) != 10:
+        return None
+
     # Validate and correct state code
-    return validate_and_correct_state_code(cleaned)
+    corrected = validate_and_correct_state_code(cleaned)
+    return corrected
+
 
 def generate_frames():
     global recognized_plates
